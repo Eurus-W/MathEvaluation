@@ -1,0 +1,10 @@
+# 忽略 Python 缓存
+**/__pycache__/
+*.pyc
+
+# 忽略日志和输出结果
+evaluation/logs/
+evaluation/outputs/
+
+# 如果你决定保留数据，就确保下面这一行没有被排除
+# evaluation/data/  <-- 这一行不要写，或者在前面加 ! 取消忽略
