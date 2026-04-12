@@ -58,6 +58,8 @@ def load_prompt(data_name, prompt_type, num_shots):
 
     if data_name in ["gsm_hard", "svamp", "tabmwp", "asdiv", "mawps"]:
         data_name = "gsm8k"
+    if data_name in ["math_500"]:
+        data_name = "math"
     if data_name in ["math_oai", "hungarian_exam", "math-oai", "aime24", "amc23"]:
         data_name = "math"
     if data_name in ["sat_math"]:
@@ -162,6 +164,8 @@ PROMPT_TEMPLATES = {
         "\n\n",
     ),
     "numina": ("### Problem: {input}\n### Solution:", " {output}", "\n\n"),
+    "llama-r1-distill-cot": ("<｜begin▁of▁sentence｜><｜User｜>{input}Please reason step by step, and put your final answer within \\boxed{{}}.<｜Assistant｜><think>\n", "{output}", "\n\n"),
+    "llama-r1-distill": ("<｜begin▁of▁sentence｜><｜User｜>{input}<｜Assistant｜><think>\n", "{output}", "\n\n"),
 }
 
 

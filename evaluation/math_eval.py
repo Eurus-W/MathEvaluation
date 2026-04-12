@@ -1,3 +1,4 @@
+import json
 import random
 import os
 import argparse
@@ -105,6 +106,31 @@ def prepare_data(data_name, args):
     return examples, processed_samples, out_file
 
 
+def get_output_length_metrics(outputs, tokenizer=None):
+    if not outputs:
+        return {
+            "avg_output_chars": 0.0,
+            "avg_output_tokens": 0.0,
+        }
+
+    char_lengths = [len(output) for output in outputs]
+    metrics = {
+        "avg_output_chars": round(sum(char_lengths) / len(char_lengths), 1),
+    }
+
+    if tokenizer is None:
+        metrics["avg_output_tokens"] = 0.0
+        return metrics
+
+    token_lengths = [
+        len(tokenizer.encode(output, add_special_tokens=False)) for output in outputs
+    ]
+    metrics["avg_output_tokens"] = round(
+        sum(token_lengths) / len(token_lengths), 1
+    )
+    return metrics
+
+
 def setup(args):
     # load model
     available_gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
@@ -115,11 +141,9 @@ def setup(args):
             pipeline_parallel_size=args.pipeline_parallel_size,
             trust_remote_code=True,
         )
-        tokenizer = None
-        if args.apply_chat_template:
-            tokenizer = AutoTokenizer.from_pretrained(
-                args.model_name_or_path, trust_remote_code=True
-            )
+        tokenizer = AutoTokenizer.from_pretrained(
+            args.model_name_or_path, trust_remote_code=True, use_fast=True
+        )
     else:
         llm, tokenizer = load_hf_lm_and_tokenizer(
             model_name_or_path=args.model_name_or_path,
@@ -382,6 +406,8 @@ def main(llm, tokenizer, data_name, args):
         prompt_type=args.prompt_type,
         execute=True,
     )
+    all_codes = [code for sample in all_samples for code in sample.get("code", [])]
+    length_metrics = get_output_length_metrics(all_codes, tokenizer)
 
     # save outputs
     if len(processed_samples) < len(all_samples) and args.save_outputs:
@@ -391,6 +417,8 @@ def main(llm, tokenizer, data_name, args):
     result_json["time_use_in_minite"] = (
         f"{int(time_use // 60)}:{int(time_use % 60):02d}"
     )
+    result_json.update(length_metrics)
+    print(result_json)
 
     with open(
         out_file.replace(".jsonl", f"_{args.prompt_type}_metrics.json"), "w"
