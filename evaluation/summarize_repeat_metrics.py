@@ -44,6 +44,7 @@ def main():
     args = parse_args()
     data_names = [item.strip() for item in args.data_names.split(",") if item.strip()]
     seeds = [int(item.strip()) for item in args.seeds.split(",") if item.strip()]
+    data_tag = data_names[0] if len(data_names) == 1 else "multi"
 
     summary = {
         "model_name_or_path": args.model_name_or_path,
@@ -99,7 +100,7 @@ def main():
 
     output_path = os.path.join(
         args.output_dir,
-        f"repeat_summary_t{args.temperature}_n{args.n_sampling}_seeds_{args.seeds.replace(',', '-')}.json",
+        f"repeat_summary_{data_tag}_t{args.temperature}_n{args.n_sampling}_seeds_{args.seeds.replace(',', '-')}.json",
     )
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=4, ensure_ascii=False)

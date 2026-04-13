@@ -53,6 +53,7 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 - `SETTING_SPECS=0.0:1,0.6:1,1.0:16`
 - `SEEDS=0`
 - `SETTING_ALIAS=""`
+- `RUN_ORDER=seed_major`
 - `MAX_TOKENS=2048`
 - `NUM_TEST_SAMPLE=-1`
 - `OVERWRITE=1`
@@ -79,6 +80,15 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
   0 \
   1
 ```
+
+`RUN_ORDER` 支持两种模式：
+
+- `seed_major`
+  先跑完一个 setting 下的所有 benchmark，再切下一个 seed
+- `benchmark_major`
+  先跑完一个 benchmark 的所有 seed，再切下一个 benchmark
+
+如果你希望尽快看到单个 benchmark 的完整多 seed 结果，推荐使用 `RUN_ORDER="benchmark_major"`。
 
 ## `SETTING_ALIAS`
 
@@ -172,6 +182,21 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
   7
 ```
 
+7. 复用已经完成的 `seed0`，按 benchmark 依次补齐 `temperature=0.6` 的 5 次实验
+
+```bash
+DATA_NAMES="math,minerva_math,olympiadbench,aime24,amc23" \
+SETTING_ALIAS="t06x5" \
+RUN_ORDER="benchmark_major" \
+MAX_TOKENS=16384 \
+OVERWRITE=0 \
+bash sh/run_dual_model_llama_r1_distill_cot.sh \
+  /path/to/model_a \
+  /path/to/model_b \
+  6 \
+  7
+```
+
 ## 可选环境变量
 
 运行前可以通过环境变量覆盖默认配置：
@@ -180,6 +205,7 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 - `SETTING_SPECS`
 - `SEEDS`
 - `SETTING_ALIAS`
+- `RUN_ORDER`
 - `MAX_TOKENS`
 - `NUM_TEST_SAMPLE`
 - `PIPELINE_PARALLEL_SIZE`
@@ -191,6 +217,7 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 DATA_NAMES="math,math_500" \
 SETTING_SPECS="0.0:1" \
 SEEDS="0,1,2,3,4" \
+RUN_ORDER="benchmark_major" \
 MAX_TOKENS=4096 \
 OVERWRITE=0 \
 bash sh/run_dual_model_llama_r1_distill_cot.sh \
@@ -207,6 +234,7 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 - 输出：`evaluation/outputs/dual_model_llama_r1_distill_cot/<model_tag>/<setting_tag>/`
 - 日志：`evaluation/logs/dual_model_llama_r1_distill_cot/<model_tag>_<setting_tag>.log`
 - 多 seed 日志：`evaluation/logs/dual_model_llama_r1_distill_cot/<model_tag>_<setting_tag>_seed<seed>.log`
+- `benchmark_major` 模式下的日志：`evaluation/logs/dual_model_llama_r1_distill_cot/<model_tag>_<setting_tag>_<data_name>_seed<seed>.log`
 
 其中：
 
@@ -218,6 +246,8 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 对于多 seed setting，脚本还会额外生成一个汇总文件：
 
 - `evaluation/outputs/dual_model_llama_r1_distill_cot/<model_tag>/<setting_tag>/repeat_summary_t<temperature>_n<n_sampling>_seeds_<seed-list>.json`
+- `benchmark_major` 模式下会按 benchmark 额外生成：
+  `evaluation/outputs/dual_model_llama_r1_distill_cot/<model_tag>/<setting_tag>/repeat_summary_<data_name>_t<temperature>_n<n_sampling>_seeds_<seed-list>.json`
 
 这个汇总文件会包含：
 
@@ -234,6 +264,7 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 - 脚本会进入 `evaluation/` 目录后再执行 `math_eval.py`
 - 当 `OVERWRITE=1` 时，会覆盖已有同名结果
 - 当 `OVERWRITE=0` 时，会尽量复用已有输出继续跑
+- 如果你已经确认当前 `seed0` 是正确的正式结果，做多 seed 补跑时通常推荐 `OVERWRITE=0`
 
 ## 结果检查
 
@@ -252,6 +283,11 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 
 
 ### Evaluation
+This section documents the original single-model entrypoints and should be treated as legacy usage.
+
+- If you are running the current `llama-r1-distill-cot` comparison workflow, prefer `sh/run_dual_model_llama_r1_distill_cot.sh`.
+- Use the commands below mainly for the older Qwen2.5/Qwen2-Math-Instruct evaluation flow.
+
 You can evaluate Qwen2.5/Qwen2-Math-Instruct series model with the following command:
 ```bash
 # Qwen2.5-Math-Instruct Series
