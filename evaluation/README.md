@@ -11,7 +11,7 @@ pip install transformers==4.42.3
 
 # `run_dual_model_llama_r1_distill_cot.sh`
 
-用于同时评测两个模型，固定使用 `llama-r1-distill-cot` prompt，并按多组采样配置自动运行。
+用于同时评测两个模型，固定使用 `llama-r1-distill-cot` prompt，并按多组 decoding 配置自动运行。
 
 ## 用途
 
@@ -19,7 +19,8 @@ pip install transformers==4.42.3
 
 - 对比两个模型在同一批 benchmark 上的表现
 - 一次性跑完多组 decoding 配置
-- 在两张 GPU 上并行跑两个模型，或者在单张 GPU 上串行跑完
+- 用单张 GPU 串行跑完两个模型，或者用两张 GPU 并行跑
+- 对 `temperature=0.6, n_sampling=1` 做多次重复实验并自动汇总 5 次结果
 
 ## 基本用法
 
@@ -50,6 +51,8 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 - `PROMPT_TYPE=llama-r1-distill-cot`
 - `DATA_NAMES=math,minerva_math,olympiadbench,aime24`
 - `SETTING_SPECS=0.0:1,0.6:1,1.0:16`
+- `SEEDS=0`
+- `SETTING_ALIAS=""`
 - `MAX_TOKENS=2048`
 - `NUM_TEST_SAMPLE=-1`
 - `OVERWRITE=1`
@@ -65,6 +68,39 @@ temperature:n_sampling,temperature:n_sampling,...
 - `0.0:1` 表示 greedy
 - `1.0:16` 表示温度为 1.0，采样 16 次
 
+如果你想让某个 setting 跑多个 seed，可以直接配合 `SEEDS` 使用。例如：
+
+```bash
+SETTING_SPECS="0.6:1" \
+SEEDS="0,1,2,3,4" \
+bash sh/run_dual_model_llama_r1_distill_cot.sh \
+  /path/to/model_a \
+  /path/to/model_b \
+  0 \
+  1
+```
+
+## `SETTING_ALIAS`
+
+为了少配参数，脚本支持几个短别名：
+
+- `SETTING_ALIAS="basic"`
+  代表 `0.0:1:0;0.6:1:0;1.0:16:0`
+- `SETTING_ALIAS="t06x5"`
+  代表 `0.6:1:0,1,2,3,4`
+- `SETTING_ALIAS="all"`
+  代表 `0.0:1:0;0.6:1:0,1,2,3,4;1.0:16:0`
+
+其中 `all` 的含义是：
+
+- `temperature=0.0, n_sampling=1, seed=0`
+- `temperature=0.6, n_sampling=1, seed=0,1,2,3,4`
+- `temperature=1.0, n_sampling=16, seed=0`
+
+这个别名适合做完整一轮实验，而且不会重复多跑一遍 `t=0.6, seed=0`。
+
+当 `SETTING_ALIAS` 非空时，脚本会优先使用别名展开后的 job 列表，忽略手动传入的 `SETTING_SPECS` 和 `SEEDS` 组合。
+
 ## 常用示例
 
 1. 两个模型分别占一张卡并行跑默认 benchmark
@@ -77,7 +113,17 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
   1
 ```
 
-2. 只跑两组设置
+2. 单卡串行跑
+
+```bash
+bash sh/run_dual_model_llama_r1_distill_cot.sh \
+  /path/to/model_a \
+  /path/to/model_b \
+  0 \
+  0
+```
+
+3. 只跑两组设置
 
 ```bash
 SETTING_SPECS="0.0:1,0.6:1" \
@@ -88,25 +134,42 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
   1
 ```
 
-3. 加入 `math_500`
+4. 跑 5 个 benchmark，使用两张卡 `6/7`
 
 ```bash
-DATA_NAMES="math,math_500,minerva_math,olympiadbench,aime24" \
+DATA_NAMES="math,minerva_math,olympiadbench,aime24,amc23" \
+MAX_TOKENS=16384 \
 bash sh/run_dual_model_llama_r1_distill_cot.sh \
   /path/to/model_a \
   /path/to/model_b \
-  0 \
-  1
+  6 \
+  7
 ```
 
-4. 单卡串行跑
+5. 只跑新的 `temperature=0.6` 5 次重复实验
 
 ```bash
+DATA_NAMES="math,minerva_math,olympiadbench,aime24,amc23" \
+SETTING_ALIAS="t06x5" \
+MAX_TOKENS=16384 \
 bash sh/run_dual_model_llama_r1_distill_cot.sh \
   /path/to/model_a \
   /path/to/model_b \
-  0 \
-  0
+  6 \
+  7
+```
+
+6. 一键跑完整实验
+
+```bash
+DATA_NAMES="math,minerva_math,olympiadbench,aime24,amc23" \
+SETTING_ALIAS="all" \
+MAX_TOKENS=16384 \
+bash sh/run_dual_model_llama_r1_distill_cot.sh \
+  /path/to/model_a \
+  /path/to/model_b \
+  6 \
+  7
 ```
 
 ## 可选环境变量
@@ -115,6 +178,8 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 
 - `DATA_NAMES`
 - `SETTING_SPECS`
+- `SEEDS`
+- `SETTING_ALIAS`
 - `MAX_TOKENS`
 - `NUM_TEST_SAMPLE`
 - `PIPELINE_PARALLEL_SIZE`
@@ -125,6 +190,7 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 ```bash
 DATA_NAMES="math,math_500" \
 SETTING_SPECS="0.0:1" \
+SEEDS="0,1,2,3,4" \
 MAX_TOKENS=4096 \
 OVERWRITE=0 \
 bash sh/run_dual_model_llama_r1_distill_cot.sh \
@@ -140,11 +206,26 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 
 - 输出：`evaluation/outputs/dual_model_llama_r1_distill_cot/<model_tag>/<setting_tag>/`
 - 日志：`evaluation/logs/dual_model_llama_r1_distill_cot/<model_tag>_<setting_tag>.log`
+- 多 seed 日志：`evaluation/logs/dual_model_llama_r1_distill_cot/<model_tag>_<setting_tag>_seed<seed>.log`
 
 其中：
 
 - `<model_tag>` 来自模型路径最后两级目录，并把 `/` 替换成 `_`
 - `<setting_tag>` 形如 `t0.0_n1`
+
+当某个 setting 跑多个 seed 时，原始输出仍然写在同一个 `<setting_tag>/` 目录下，但文件名里会带 `seed`。
+
+对于多 seed setting，脚本还会额外生成一个汇总文件：
+
+- `evaluation/outputs/dual_model_llama_r1_distill_cot/<model_tag>/<setting_tag>/repeat_summary_t<temperature>_n<n_sampling>_seeds_<seed-list>.json`
+
+这个汇总文件会包含：
+
+- 每个 benchmark 的 5 次 `acc`
+- 每个 benchmark 的 5 次 `avg_output_tokens`
+- 每个 benchmark 的平均 `acc`
+- 每个 benchmark 的平均 `avg_output_tokens`
+- overall 平均结果
 
 ## 运行前注意
 
@@ -159,7 +240,7 @@ bash sh/run_dual_model_llama_r1_distill_cot.sh \
 脚本运行时会先打印执行计划，包括：
 
 - 每个模型使用的 GPU
-- 每组 temperature / n_sampling
+- 每组 temperature / n_sampling / seeds
 - 当前跑的 benchmark 列表
 - 输出目录和日志路径
 
