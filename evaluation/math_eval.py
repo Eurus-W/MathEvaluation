@@ -11,7 +11,15 @@ import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
 from evaluate import evaluate
-from utils import set_seed, load_jsonl, save_jsonl, construct_prompt
+from utils import (
+    set_seed,
+    load_jsonl,
+    save_jsonl,
+    construct_prompt,
+    build_chat_messages,
+    get_baseline_instruction,
+    COT_BASELINE_INSTRUCTIONS,
+)
 from parser import *
 from trajectory import *
 from data_loader import load_data
@@ -33,11 +41,15 @@ def log_vllm_engine_config(args, available_gpus):
     print(json.dumps(config, indent=4, ensure_ascii=False))
 
 
+def effective_max_tokens(args):
+    return max(1, int(args.max_tokens_per_call * args.truncation_ratio))
+
+
 def build_vllm_sampling_params(args, stop_words):
     return SamplingParams(
         temperature=args.temperature,
         top_p=args.top_p,
-        max_tokens=args.max_tokens_per_call,
+        max_tokens=effective_max_tokens(args),
         n=1,
         stop=stop_words,
         stop_token_ids=(
@@ -54,6 +66,10 @@ def log_vllm_sampling_config(args, data_name, sampling_params):
         "temperature": sampling_params.temperature,
         "top_p": sampling_params.top_p,
         "max_tokens": sampling_params.max_tokens,
+        "max_tokens_per_call": args.max_tokens_per_call,
+        "truncation_ratio": args.truncation_ratio,
+        "cot_baseline": args.cot_baseline,
+        "lc_ratio": args.lc_ratio,
         "n": sampling_params.n,
         "stop_count": len(sampling_params.stop) if sampling_params.stop else 0,
         "stop_token_ids": sampling_params.stop_token_ids,
@@ -95,10 +111,32 @@ def parse_args():
         action="store_true",
         help="Few shot for multiple-choice questions, zero shot for others.",
     )
+    parser.add_argument(
+        "--cot_baseline",
+        default="none",
+        choices=list(COT_BASELINE_INSTRUCTIONS.keys()),
+        help="TokenSkip naive prompt-based baseline to inject before the question. Requires --apply_chat_template.",
+    )
+    parser.add_argument(
+        "--lc_ratio",
+        type=float,
+        default=0.5,
+        help="Word-reduction ratio used only when --cot_baseline=lc_prompt.",
+    )
+    parser.add_argument(
+        "--truncation_ratio",
+        type=float,
+        default=1.0,
+        help="Multiplier applied to --max_tokens_per_call (TokenSkip Truncation baseline).",
+    )
     args = parser.parse_args()
     args.top_p = (
         1 if args.temperature == 0 else args.top_p
     )  # top_p must be 1 when using greedy sampling (vllm)
+    if args.cot_baseline != "none" and not args.apply_chat_template:
+        parser.error("--cot_baseline requires --apply_chat_template")
+    if not (0.0 < args.truncation_ratio <= 1.0):
+        parser.error("--truncation_ratio must be in (0, 1]")
     return args
 
 
@@ -282,18 +320,21 @@ def main(llm, tokenizer, data_name, args):
         samples.append(sample)
 
     # repeat n times
-    input_prompts = [
-        sample["prompt"] for sample in samples for _ in range(args.n_sampling)
-    ]
     if args.apply_chat_template:
-        input_prompts = [
+        baseline_instr = get_baseline_instruction(args.cot_baseline, args.lc_ratio)
+        per_sample_prompts = [
             tokenizer.apply_chat_template(
-                [{"role": "user", "content": prompt.strip()}],
+                build_chat_messages(sample["question"], baseline_instr),
                 tokenize=False,
                 add_generation_prompt=True,
             )
-            for prompt in input_prompts
+            for sample in samples
         ]
+    else:
+        per_sample_prompts = [sample["prompt"] for sample in samples]
+    input_prompts = [p for p in per_sample_prompts for _ in range(args.n_sampling)]
+    if args.apply_chat_template and samples:
+        print("[chat_template] first rendered prompt:\n" + per_sample_prompts[0])
     remain_prompts = input_prompts
     remain_prompts = [(i, prompt) for i, prompt in enumerate(remain_prompts)]
     end_prompts = []
@@ -345,7 +386,7 @@ def main(llm, tokenizer, data_name, args):
                 model=llm,
                 tokenizer=tokenizer,
                 prompts=prompts,
-                max_new_tokens=args.max_tokens_per_call,
+                max_new_tokens=effective_max_tokens(args),
                 batch_size=16,
                 stop_id_sequences=stop_words,
             )

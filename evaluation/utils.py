@@ -169,6 +169,33 @@ PROMPT_TEMPLATES = {
 }
 
 
+REASON_SUFFIX = "Please reason step by step, and put your final answer within \\boxed{}."
+
+COT_BASELINE_INSTRUCTIONS = {
+    "none": "",
+    "beconcise": "Be concise.",
+    "onlynumbers": "Only use numbers or equations.",
+    "abbrewords": "Abbreviate words as much as possible.",
+    "lc_prompt": "Please reduce {pct}% of the words in your Chain-of-Thought process.",
+}
+
+
+def get_baseline_instruction(name: str, lc_ratio: float) -> str:
+    tmpl = COT_BASELINE_INSTRUCTIONS[name]
+    if name == "lc_prompt":
+        return tmpl.format(pct=int(round(lc_ratio * 100)))
+    return tmpl
+
+
+def build_chat_messages(question: str, baseline_instruction: str):
+    parts = []
+    if baseline_instruction:
+        parts.append(baseline_instruction)
+    parts.append(question)
+    parts.append(REASON_SUFFIX)
+    return [{"role": "user", "content": "\n\n".join(parts)}]
+
+
 def construct_prompt(example, data_name, args):
     if args.adapt_few_shot and data_name in [
         "gaokao2024_I",
