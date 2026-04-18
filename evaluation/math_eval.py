@@ -19,6 +19,49 @@ from python_executor import PythonExecutor
 from model_utils import load_hf_lm_and_tokenizer, generate_completions
 
 
+def log_vllm_engine_config(args, available_gpus):
+    config = {
+        "model_name_or_path": args.model_name_or_path,
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+        "available_gpus": available_gpus,
+        "seed": args.seed,
+        "tensor_parallel_size": len(available_gpus) // args.pipeline_parallel_size,
+        "pipeline_parallel_size": args.pipeline_parallel_size,
+        "trust_remote_code": True,
+    }
+    print("[vllm_engine_config]")
+    print(json.dumps(config, indent=4, ensure_ascii=False))
+
+
+def build_vllm_sampling_params(args, stop_words):
+    return SamplingParams(
+        temperature=args.temperature,
+        top_p=args.top_p,
+        max_tokens=args.max_tokens_per_call,
+        n=1,
+        stop=stop_words,
+        stop_token_ids=(
+            [151645, 151643] if "qwen2" in args.model_name_or_path.lower() else None
+        ),
+    )
+
+
+def log_vllm_sampling_config(args, data_name, sampling_params):
+    config = {
+        "data_name": data_name,
+        "prompt_type": args.prompt_type,
+        "seed": args.seed,
+        "temperature": sampling_params.temperature,
+        "top_p": sampling_params.top_p,
+        "max_tokens": sampling_params.max_tokens,
+        "n": sampling_params.n,
+        "stop_count": len(sampling_params.stop) if sampling_params.stop else 0,
+        "stop_token_ids": sampling_params.stop_token_ids,
+    }
+    print("[vllm_sampling_config]")
+    print(json.dumps(config, indent=4, ensure_ascii=False))
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_names", default="gsm8k,math", type=str)
@@ -135,11 +178,13 @@ def setup(args):
     # load model
     available_gpus = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
     if args.use_vllm:
+        log_vllm_engine_config(args, available_gpus)
         llm = LLM(
             model=args.model_name_or_path,
             tensor_parallel_size=len(available_gpus) // args.pipeline_parallel_size,
             pipeline_parallel_size=args.pipeline_parallel_size,
             trust_remote_code=True,
+            seed=args.seed,
         )
         tokenizer = AutoTokenizer.from_pretrained(
             args.model_name_or_path, trust_remote_code=True, use_fast=True
@@ -273,6 +318,10 @@ def main(llm, tokenizer, data_name, args):
     # start inference
     # measure time use
     start_time = time.time()
+    sampling_params = None
+    if args.use_vllm:
+        sampling_params = build_vllm_sampling_params(args, stop_words)
+        log_vllm_sampling_config(args, data_name, sampling_params)
     for epoch in range(max_func_call):
         print("-" * 20, "Epoch", epoch)
         current_prompts = remain_prompts
@@ -284,18 +333,7 @@ def main(llm, tokenizer, data_name, args):
         if args.use_vllm:
             outputs = llm.generate(
                 prompts,
-                SamplingParams(
-                    temperature=args.temperature,
-                    top_p=args.top_p,
-                    max_tokens=args.max_tokens_per_call,
-                    n=1,
-                    stop=stop_words,
-                    stop_token_ids=(
-                        [151645, 151643]
-                        if "qwen2" in args.model_name_or_path.lower()
-                        else None
-                    ),
-                ),
+                sampling_params,
             )
 
             outputs = sorted(
