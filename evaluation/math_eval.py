@@ -17,6 +17,7 @@ from utils import (
     save_jsonl,
     construct_prompt,
     build_chat_messages,
+    apply_cot_baseline_post_chat_template,
     get_baseline_instruction,
     COT_BASELINE_INSTRUCTIONS,
 )
@@ -49,6 +50,7 @@ def build_vllm_sampling_params(args, stop_words):
     return SamplingParams(
         temperature=args.temperature,
         top_p=args.top_p,
+        top_k=args.top_k,
         max_tokens=effective_max_tokens(args),
         n=1,
         stop=stop_words,
@@ -65,6 +67,7 @@ def log_vllm_sampling_config(args, data_name, sampling_params):
         "seed": args.seed,
         "temperature": sampling_params.temperature,
         "top_p": sampling_params.top_p,
+        "top_k": sampling_params.top_k,
         "max_tokens": sampling_params.max_tokens,
         "max_tokens_per_call": args.max_tokens_per_call,
         "truncation_ratio": args.truncation_ratio,
@@ -93,6 +96,7 @@ def parse_args():
     parser.add_argument("--temperature", default=0, type=float)
     parser.add_argument("--n_sampling", default=1, type=int)
     parser.add_argument("--top_p", default=1, type=float)
+    parser.add_argument("--top_k", default=-1, type=int)
     parser.add_argument("--max_tokens_per_call", default=2048, type=int)
     parser.add_argument("--shuffle", action="store_true")
     parser.add_argument("--use_vllm", action="store_true")
@@ -133,6 +137,7 @@ def parse_args():
     args.top_p = (
         1 if args.temperature == 0 else args.top_p
     )  # top_p must be 1 when using greedy sampling (vllm)
+    args.top_k = -1 if args.temperature == 0 else args.top_k
     if args.cot_baseline != "none" and not args.apply_chat_template:
         parser.error("--cot_baseline requires --apply_chat_template")
     if not (0.0 < args.truncation_ratio <= 1.0):
@@ -285,18 +290,17 @@ def main(llm, tokenizer, data_name, args):
             continue
         gt_cot, gt_ans = parse_ground_truth(example, data_name)
         example["gt_ans"] = gt_ans
-        full_prompt = construct_prompt(example, data_name, args)
-
-        if idx == args.start:
-            print(full_prompt)
-
         sample = {
             "idx": idx,
             "question": example["question"],
             "gt_cot": gt_cot,
             "gt": gt_ans,
-            "prompt": full_prompt,
         }
+        if not args.apply_chat_template:
+            full_prompt = construct_prompt(example, data_name, args)
+            sample["prompt"] = full_prompt
+            if idx == args.start:
+                print("[prompt] first rendered prompt:\n" + full_prompt)
 
         # add remain fields
         for key in [
@@ -323,18 +327,25 @@ def main(llm, tokenizer, data_name, args):
     if args.apply_chat_template:
         baseline_instr = get_baseline_instruction(args.cot_baseline, args.lc_ratio)
         per_sample_prompts = [
-            tokenizer.apply_chat_template(
-                build_chat_messages(sample["question"], baseline_instr),
-                tokenize=False,
-                add_generation_prompt=True,
+            apply_cot_baseline_post_chat_template(
+                tokenizer.apply_chat_template(
+                    build_chat_messages(sample["question"], baseline_instr),
+                    tokenize=False,
+                    add_generation_prompt=True,
+                ),
+                args.cot_baseline,
             )
             for sample in samples
         ]
+        if samples:
+            print("[chat_template] first rendered prompt:\n" + per_sample_prompts[0])
     else:
         per_sample_prompts = [sample["prompt"] for sample in samples]
+        if samples:
+            print("[prompt] first rendered prompt:\n" + per_sample_prompts[0])
+    for sample, input_prompt in zip(samples, per_sample_prompts):
+        sample["input_prompt"] = input_prompt
     input_prompts = [p for p in per_sample_prompts for _ in range(args.n_sampling)]
-    if args.apply_chat_template and samples:
-        print("[chat_template] first rendered prompt:\n" + per_sample_prompts[0])
     remain_prompts = input_prompts
     remain_prompts = [(i, prompt) for i, prompt in enumerate(remain_prompts)]
     end_prompts = []
@@ -382,13 +393,20 @@ def main(llm, tokenizer, data_name, args):
             )  # sort outputs by request_id
             outputs = [output.outputs[0].text for output in outputs]
         else:
+            generation_kwargs = {
+                "max_new_tokens": effective_max_tokens(args),
+            }
+            if args.top_k > 0:
+                generation_kwargs["top_k"] = args.top_k
+            if args.top_p < 1:
+                generation_kwargs["top_p"] = args.top_p
             outputs = generate_completions(
                 model=llm,
                 tokenizer=tokenizer,
                 prompts=prompts,
-                max_new_tokens=effective_max_tokens(args),
                 batch_size=16,
                 stop_id_sequences=stop_words,
+                **generation_kwargs,
             )
 
         assert len(outputs) == len(current_prompts)
@@ -473,7 +491,7 @@ def main(llm, tokenizer, data_name, args):
                     [c for c in preds[j] if c in ["A", "B", "C", "D", "E"]]
                 )
 
-        sample.pop("prompt")
+        sample.pop("prompt", None)
         sample.update({"code": code, "pred": preds, "report": reports})
         all_samples.append(sample)
 

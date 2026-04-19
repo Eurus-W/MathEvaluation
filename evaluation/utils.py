@@ -60,7 +60,7 @@ def load_prompt(data_name, prompt_type, num_shots):
         data_name = "gsm8k"
     if data_name in ["math_500"]:
         data_name = "math"
-    if data_name in ["math_oai", "hungarian_exam", "math-oai", "aime24", "amc23"]:
+    if data_name in ["math_oai", "hungarian_exam", "math-oai", "aime24", "aime25", "aime26", "amc23"]:
         data_name = "math"
     if data_name in ["sat_math"]:
         data_name = "mmlu_stem"
@@ -170,12 +170,14 @@ PROMPT_TEMPLATES = {
 
 
 REASON_SUFFIX = "Please reason step by step, and put your final answer within \\boxed{}."
+NO_THINKING_SUFFIX = "Okay, I think I have finished thinking.\n</think>\n\n"
 
 COT_BASELINE_INSTRUCTIONS = {
     "none": "",
     "beconcise": "Be concise.",
     "onlynumbers": "Only use numbers or equations.",
     "abbrewords": "Abbreviate words as much as possible.",
+    "no_thinking": "",
     "lc_prompt": "Please reduce {pct}% of the words in your Chain-of-Thought process.",
 }
 
@@ -194,6 +196,12 @@ def build_chat_messages(question: str, baseline_instruction: str):
     parts.append(question)
     parts.append(REASON_SUFFIX)
     return [{"role": "user", "content": "\n\n".join(parts)}]
+
+
+def apply_cot_baseline_post_chat_template(rendered_prompt: str, baseline_name: str) -> str:
+    if baseline_name == "no_thinking":
+        return rendered_prompt + NO_THINKING_SUFFIX
+    return rendered_prompt
 
 
 def construct_prompt(example, data_name, args):

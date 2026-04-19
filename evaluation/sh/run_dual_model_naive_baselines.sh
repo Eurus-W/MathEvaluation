@@ -12,7 +12,7 @@ Usage:
 
 Notes:
   - Always passes --apply_chat_template; the tokenizer's own chat_template handles formatting.
-  - Sweeps the TokenSkip naive baselines (BeConcise, OnlyNumbers, AbbreWords, LC-Prompt)
+  - Sweeps the TokenSkip naive baselines (BeConcise, OnlyNumbers, AbbreWords, NoThinking, LC-Prompt)
     via --cot_baseline, plus the Truncation baseline via --truncation_ratio.
   - Default benchmarks: math,minerva_math,olympiadbench,aime24.
   - Default decoding settings:
@@ -20,8 +20,9 @@ Notes:
       2) temperature=0.6, n_sampling=1
       3) temperature=1.0, n_sampling=16
   - Model 1 defaults to prompt_type=qwen25-math-cot; model 2 defaults to llama-r1-distill-cot.
-    Override via PROMPT_TYPE_1 / PROMPT_TYPE_2 (prompt_type only affects stop-word logic here;
-    the actual prompt is built from the tokenizer's chat_template).
+    Override via PROMPT_TYPE_1 / PROMPT_TYPE_2. When --apply_chat_template is enabled,
+    the actual prompt text comes from tokenizer.chat_template + baseline/question content;
+    prompt_type is only used for decoding / post-processing behavior and output naming.
   - If the two CUDA device arguments are different, the two models run in parallel.
   - If the two CUDA device arguments are the same, all jobs run sequentially on that single GPU.
   - Optional env overrides:
@@ -31,11 +32,13 @@ Notes:
       SETTING_ALIAS="all"
       RUN_ORDER="benchmark_major"
       OVERWRITE=0
-      BASELINES="none,beconcise,onlynumbers,abbrewords,lc_prompt"
+      BASELINES="none,beconcise,onlynumbers,abbrewords,no_thinking,lc_prompt"
       TRUNCATION_RATIOS="1.0"          # e.g. "1.0,0.9,0.7,0.5" to sweep Truncation
       LC_RATIO="0.5"
+      NONE_TR1_TAG="original"         # directory/log alias for baseline=none + truncation=1.0
       PROMPT_TYPE_1="qwen25-math-cot"
       PROMPT_TYPE_2="llama-r1-distill-cot"
+      DRY_RUN=1                        # print expanded jobs without executing them
 EOF
     exit 1
 fi
@@ -57,9 +60,11 @@ NUM_TEST_SAMPLE=${NUM_TEST_SAMPLE:--1}
 MAX_TOKENS=${MAX_TOKENS:-2048}
 PIPELINE_PARALLEL_SIZE=${PIPELINE_PARALLEL_SIZE:-1}
 OVERWRITE=${OVERWRITE:-1}
-BASELINES=${BASELINES:-"none,beconcise,onlynumbers,abbrewords,lc_prompt"}
+BASELINES=${BASELINES:-"none,beconcise,onlynumbers,abbrewords,no_thinking,lc_prompt"}
 TRUNCATION_RATIOS=${TRUNCATION_RATIOS:-"1.0"}
 LC_RATIO=${LC_RATIO:-"0.5"}
+NONE_TR1_TAG=${NONE_TR1_TAG:-"original"}
+DRY_RUN=${DRY_RUN:-0}
 
 RUN_ROOT="${EVAL_DIR}/outputs/dual_model_naive_baselines"
 LOG_ROOT="${EVAL_DIR}/logs/dual_model_naive_baselines"
@@ -72,6 +77,45 @@ sanitize_name() {
     value=${value// /_}
     value=${value//\//_}
     echo "${value}"
+}
+
+resolve_baseline_tag() {
+    local baseline=$1
+    local truncation_ratio=$2
+    local lc_ratio=$3
+    if [[ "${baseline}" == "none" && ( "${truncation_ratio}" == "1" || "${truncation_ratio}" == "1.0" ) ]]; then
+        echo "${NONE_TR1_TAG}"
+        return 0
+    fi
+    if [[ "${baseline}" == "lc_prompt" ]]; then
+        echo "${baseline}_lc${lc_ratio}"
+    else
+        echo "${baseline}"
+    fi
+}
+
+build_output_dir() {
+    local model_tag=$1
+    local baseline_tag=$2
+    local tr_tag=$3
+    local setting_tag=$4
+    echo "${RUN_ROOT}/models/${model_tag}/methods/${baseline_tag}/${tr_tag}/${setting_tag}"
+}
+
+build_log_dir() {
+    local model_tag=$1
+    local baseline_tag=$2
+    local tr_tag=$3
+    local setting_tag=$4
+    echo "${LOG_ROOT}/models/${model_tag}/methods/${baseline_tag}/${tr_tag}/${setting_tag}"
+}
+
+print_dry_run_command() {
+    local cuda_devices=$1
+    shift
+    printf '[dry_run] cmd=TOKENIZERS_PARALLELISM=false CUDA_VISIBLE_DEVICES=%q ' "${cuda_devices}"
+    printf '%q ' "$@"
+    printf '\n'
 }
 
 resolve_setting_alias() {
@@ -111,6 +155,11 @@ run_repeat_summary() {
         return 0
     fi
 
+    if [[ "${DRY_RUN}" == "1" ]]; then
+        echo "[dry_run] skip summarize_repeat_metrics output_dir=${output_dir} temperature=${temperature} n_sampling=${n_sampling} seeds=${seeds_csv}"
+        return 0
+    fi
+
     (
         cd "${EVAL_DIR}"
         python3 summarize_repeat_metrics.py \
@@ -135,22 +184,29 @@ run_single_setting() {
     local seeds_csv=$8
     local seed
     local log_file
+    local log_dir
     local output_dir
     local log_suffix
     local -a seed_items
     local data_name
 
     local model_tag
+    local baseline_tag
     model_tag=$(sanitize_name "${model_path}")
+    baseline_tag=$(resolve_baseline_tag "${baseline}" "${truncation_ratio}" "${LC_RATIO}")
 
     local setting_tag="t${temperature}_n${n_sampling}"
     local tr_tag="tr${truncation_ratio}"
-    output_dir="${RUN_ROOT}/${model_tag}/${baseline}/${tr_tag}/${setting_tag}"
+    output_dir=$(build_output_dir "${model_tag}" "${baseline_tag}" "${tr_tag}" "${setting_tag}")
+    log_dir=$(build_log_dir "${model_tag}" "${baseline_tag}" "${tr_tag}" "${setting_tag}")
 
-    mkdir -p "${output_dir}" "${LOG_ROOT}"
+    if [[ "${DRY_RUN}" != "1" ]]; then
+        mkdir -p "${output_dir}" "${log_dir}"
+    fi
 
-    echo "[launch] model=${model_tag} cuda=${cuda_devices} prompt=${prompt_type} baseline=${baseline} trunc=${truncation_ratio} setting=${setting_tag}"
+    echo "[launch] model=${model_tag} cuda=${cuda_devices} prompt=${prompt_type} baseline=${baseline} baseline_tag=${baseline_tag} trunc=${truncation_ratio} setting=${setting_tag}"
     echo "[output] ${output_dir}"
+    echo "[log_dir] ${log_dir}"
     echo "[seeds] ${seeds_csv}"
     echo "[run_order] ${RUN_ORDER}"
 
@@ -159,80 +215,21 @@ run_single_setting() {
         for data_name in "${DATA_NAME_ITEMS[@]}"; do
             for seed in "${seed_items[@]}"; do
                 if [[ ${#seed_items[@]} -gt 1 ]]; then
-                    log_suffix="_${data_name}_seed${seed}"
+                    log_suffix="data_${data_name}_seed${seed}"
                 else
-                    log_suffix="_${data_name}"
+                    log_suffix="data_${data_name}"
                 fi
 
-                log_file="${LOG_ROOT}/${model_tag}_${baseline}_${tr_tag}_${setting_tag}${log_suffix}.log"
+                log_file="${log_dir}/${log_suffix}.log"
 
                 echo "[log] ${log_file}"
 
-                (
-                    local -a cmd
-
-                    cd "${EVAL_DIR}"
-                    cmd=(
-                        python3 -u math_eval.py
-                        --model_name_or_path "${model_path}" \
-                        --data_names "${data_name}" \
-                        --output_dir "${output_dir}" \
-                        --split "${SPLIT}" \
-                        --prompt_type "${prompt_type}" \
-                        --apply_chat_template \
-                        --cot_baseline "${baseline}" \
-                        --lc_ratio "${LC_RATIO}" \
-                        --truncation_ratio "${truncation_ratio}" \
-                        --num_test_sample "${NUM_TEST_SAMPLE}" \
-                        --seed "${seed}" \
-                        --temperature "${temperature}" \
-                        --n_sampling "${n_sampling}" \
-                        --top_p 1 \
-                        --start 0 \
-                        --end -1 \
-                        --use_vllm \
-                        --save_outputs \
-                        --pipeline_parallel_size "${PIPELINE_PARALLEL_SIZE}" \
-                        --max_tokens_per_call "${MAX_TOKENS}"
-                    )
-
-                    echo "[info] data_name=${data_name}"
-                    echo "[info] seed=${seed}"
-                    if [[ "${OVERWRITE}" == "1" ]]; then
-                        echo "[info] overwrite enabled"
-                        cmd+=(--overwrite)
-                    else
-                        echo "[info] overwrite disabled, will resume existing outputs when possible"
-                    fi
-
-                    TOKENIZERS_PARALLELISM=false \
-                    CUDA_VISIBLE_DEVICES="${cuda_devices}" \
-                    "${cmd[@]}"
-                ) >"${log_file}" 2>&1
-            done
-
-            run_repeat_summary "${output_dir}" "${data_name}" "${temperature}" "${n_sampling}" "${model_path}" "${seeds_csv}" "${prompt_type}"
-        done
-    else
-        for seed in "${seed_items[@]}"; do
-            if [[ ${#seed_items[@]} -gt 1 ]]; then
-                log_suffix="_seed${seed}"
-            else
-                log_suffix=""
-            fi
-
-            log_file="${LOG_ROOT}/${model_tag}_${baseline}_${tr_tag}_${setting_tag}${log_suffix}.log"
-
-            echo "[log] ${log_file}"
-
-            (
                 local -a cmd
 
-                cd "${EVAL_DIR}"
                 cmd=(
                     python3 -u math_eval.py
                     --model_name_or_path "${model_path}" \
-                    --data_names "${DATA_NAMES}" \
+                    --data_names "${data_name}" \
                     --output_dir "${output_dir}" \
                     --split "${SPLIT}" \
                     --prompt_type "${prompt_type}" \
@@ -253,18 +250,94 @@ run_single_setting() {
                     --max_tokens_per_call "${MAX_TOKENS}"
                 )
 
-                echo "[info] seed=${seed}"
                 if [[ "${OVERWRITE}" == "1" ]]; then
-                    echo "[info] overwrite enabled"
                     cmd+=(--overwrite)
-                else
-                    echo "[info] overwrite disabled, will resume existing outputs when possible"
                 fi
 
-                TOKENIZERS_PARALLELISM=false \
-                CUDA_VISIBLE_DEVICES="${cuda_devices}" \
-                "${cmd[@]}"
-            ) >"${log_file}" 2>&1
+                if [[ "${DRY_RUN}" == "1" ]]; then
+                    echo "[dry_run] data_name=${data_name}"
+                    echo "[dry_run] seed=${seed}"
+                    print_dry_run_command "${cuda_devices}" "${cmd[@]}"
+                else
+                    (
+                        cd "${EVAL_DIR}"
+                        echo "[info] data_name=${data_name}"
+                        echo "[info] seed=${seed}"
+                        if [[ "${OVERWRITE}" == "1" ]]; then
+                            echo "[info] overwrite enabled"
+                        else
+                            echo "[info] overwrite disabled, will resume existing outputs when possible"
+                        fi
+
+                        TOKENIZERS_PARALLELISM=false \
+                        CUDA_VISIBLE_DEVICES="${cuda_devices}" \
+                        "${cmd[@]}"
+                    ) >"${log_file}" 2>&1
+                fi
+            done
+
+            run_repeat_summary "${output_dir}" "${data_name}" "${temperature}" "${n_sampling}" "${model_path}" "${seeds_csv}" "${prompt_type}"
+        done
+    else
+        for seed in "${seed_items[@]}"; do
+            if [[ ${#seed_items[@]} -gt 1 ]]; then
+                log_suffix="seed${seed}"
+            else
+                log_suffix="run"
+            fi
+
+            log_file="${log_dir}/${log_suffix}.log"
+
+            echo "[log] ${log_file}"
+
+            local -a cmd
+
+            cmd=(
+                python3 -u math_eval.py
+                --model_name_or_path "${model_path}" \
+                --data_names "${DATA_NAMES}" \
+                --output_dir "${output_dir}" \
+                --split "${SPLIT}" \
+                --prompt_type "${prompt_type}" \
+                --apply_chat_template \
+                --cot_baseline "${baseline}" \
+                --lc_ratio "${LC_RATIO}" \
+                --truncation_ratio "${truncation_ratio}" \
+                --num_test_sample "${NUM_TEST_SAMPLE}" \
+                --seed "${seed}" \
+                --temperature "${temperature}" \
+                --n_sampling "${n_sampling}" \
+                --top_p 1 \
+                --start 0 \
+                --end -1 \
+                --use_vllm \
+                --save_outputs \
+                --pipeline_parallel_size "${PIPELINE_PARALLEL_SIZE}" \
+                --max_tokens_per_call "${MAX_TOKENS}"
+            )
+
+            if [[ "${OVERWRITE}" == "1" ]]; then
+                cmd+=(--overwrite)
+            fi
+
+            if [[ "${DRY_RUN}" == "1" ]]; then
+                echo "[dry_run] seed=${seed}"
+                print_dry_run_command "${cuda_devices}" "${cmd[@]}"
+            else
+                (
+                    cd "${EVAL_DIR}"
+                    echo "[info] seed=${seed}"
+                    if [[ "${OVERWRITE}" == "1" ]]; then
+                        echo "[info] overwrite enabled"
+                    else
+                        echo "[info] overwrite disabled, will resume existing outputs when possible"
+                    fi
+
+                    TOKENIZERS_PARALLELISM=false \
+                    CUDA_VISIBLE_DEVICES="${cuda_devices}" \
+                    "${cmd[@]}"
+                ) >"${log_file}" 2>&1
+            fi
         done
 
         run_repeat_summary "${output_dir}" "${DATA_NAMES}" "${temperature}" "${n_sampling}" "${model_path}" "${seeds_csv}" "${prompt_type}"
@@ -321,6 +394,7 @@ echo "[info] data_names=${DATA_NAMES}"
 echo "[info] baselines=${BASELINES}"
 echo "[info] truncation_ratios=${TRUNCATION_RATIOS}"
 echo "[info] lc_ratio=${LC_RATIO}"
+echo "[info] none_tr1_tag=${NONE_TR1_TAG}"
 echo "[info] setting_alias=${SETTING_ALIAS}"
 echo "[info] setting_specs=${SETTING_SPECS}"
 echo "[info] seeds=${SEEDS}"
@@ -328,9 +402,13 @@ echo "[info] job_specs=${JOB_SPECS}"
 echo "[info] run_order=${RUN_ORDER}"
 echo "[info] model_1=${MODEL_1} cuda=${CUDA_DEVICES_1}"
 echo "[info] model_2=${MODEL_2} cuda=${CUDA_DEVICES_2}"
-echo "[info] max_tokens=${MAX_TOKENS} pipeline_parallel_size=${PIPELINE_PARALLEL_SIZE} overwrite=${OVERWRITE}"
+echo "[info] max_tokens=${MAX_TOKENS} pipeline_parallel_size=${PIPELINE_PARALLEL_SIZE} overwrite=${OVERWRITE} dry_run=${DRY_RUN}"
 
-if [[ "${CUDA_DEVICES_1}" == "${CUDA_DEVICES_2}" ]]; then
+if [[ "${DRY_RUN}" == "1" ]]; then
+    echo "[info] dry run detected, running all jobs sequentially for readable output"
+    run_model_suite "${MODEL_1}" "${CUDA_DEVICES_1}" "${PROMPT_TYPE_1}"
+    run_model_suite "${MODEL_2}" "${CUDA_DEVICES_2}" "${PROMPT_TYPE_2}"
+elif [[ "${CUDA_DEVICES_1}" == "${CUDA_DEVICES_2}" ]]; then
     echo "[info] single GPU mode detected, running all jobs sequentially"
     run_model_suite "${MODEL_1}" "${CUDA_DEVICES_1}" "${PROMPT_TYPE_1}"
     run_model_suite "${MODEL_2}" "${CUDA_DEVICES_2}" "${PROMPT_TYPE_2}"
