@@ -1,3 +1,4 @@
+这个requirements是qwen官方的，是旧的，我实际跑的是vllm=0.11.2 transformers=4.57.3 torch=2.9.0
 ### Requirements
 You can install the required packages with the following command:
 ```bash
